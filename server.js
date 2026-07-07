@@ -36,6 +36,17 @@ const OPTIMIZE_FORMATS = ['png', 'webp', 'jpeg', 'jpg', 'avif'];
 const SERVER_DIR = path.dirname(fileURLToPath(import.meta.url));
 const WITHOUTBG_DAEMON_COMPOSE = path.join(SERVER_DIR, 'withoutbg-daemon', 'docker-compose.yml');
 const WITHOUTBG_DAEMON_LOCK = path.join(process.env.HOME || process.cwd(), '.local', 'share', 'kilo', 'locks', 'withoutbg.lock');
+const execFileAsync = (command, args, options = {}) => new Promise((resolve, reject) => {
+  execFile(command, args, { ...options, env: process.env }, (error, stdout, stderr) => {
+    if (error) {
+      error.stdout = stdout;
+      error.stderr = stderr;
+      reject(error);
+      return;
+    }
+    resolve({ stdout, stderr });
+  });
+});
 
 function env(name) { return process.env[name] || ''; }
 function truthyEnv(name) { return ['1', 'true', 'yes', 'on'].includes(env(name).trim().toLowerCase()); }
@@ -70,6 +81,7 @@ function localModelName() { return String(env('IMAGE_MCP_LOCAL_MODEL') || '').tr
 function localTimeoutMs() { const value = Number(env('IMAGE_MCP_LOCAL_TIMEOUT_MS') || ''); return Number.isFinite(value) && value > 0 ? value : 120000; }
 function localAutostartEnabled() { return ['1', 'true', 'yes', 'on'].includes(env('IMAGE_MCP_LOCAL_AUTOSTART').trim().toLowerCase()); }
 function localBootstrapEnabled() { return ['1', 'true', 'yes', 'on'].includes(env('IMAGE_MCP_LOCAL_BOOTSTRAP').trim().toLowerCase()); }
+function withoutBgAutostartEnabled() { return ['1', 'true', 'yes', 'on'].includes(env('WITHOUTBG_AUTOSTART').trim().toLowerCase()); }
 function localSetupInstructions(provider) {
   if (provider === 'mlx') return ['Install MLX-VLM or your chosen MLX wrapper', 'Start the local HTTP endpoint', 'Set IMAGE_MCP_LOCAL_ENDPOINT and IMAGE_MCP_LOCAL_MODEL'];
   if (provider === 'comfyui') return ['Start ComfyUI', 'Expose a workflow endpoint that accepts image generation jobs', 'Set IMAGE_MCP_LOCAL_ENDPOINT and IMAGE_MCP_LOCAL_MODEL'];
@@ -93,7 +105,8 @@ function localProviderEndpointHint(provider) {
 }
 function withoutBgDaemonUrl() { const configured = env('WITHOUTBG_DAEMON_URL').trim(); return configured || 'http://127.0.0.1:8765'; }
 let _cachedWithoutBgHealth = { ok: false, checkedAt: 0 };
-async function withoutBgDaemonHealthy() { const now = Date.now(); if (now - _cachedWithoutBgHealth.checkedAt < 5000) return _cachedWithoutBgHealth.ok; try { const response = await axios.get(`${withoutBgDaemonUrl().replace(/\/$/, '')}/health`, { timeout: 2000 }); const ok = Boolean(response?.data?.ok ?? response?.data?.status === 'ok' ?? response?.status === 200); _cachedWithoutBgHealth = { ok, checkedAt: now }; return ok; } catch { _cachedWithoutBgHealth = { ok: false, checkedAt: now }; return false; } }
+async function withoutBgDaemonHealthy({ bypassCache = false } = {}) { const now = Date.now(); if (!bypassCache && now - _cachedWithoutBgHealth.checkedAt < 5000) return _cachedWithoutBgHealth.ok; try { const response = await axios.get(`${withoutBgDaemonUrl().replace(/\/$/, '')}/health`, { timeout: 2000 }); const ok = Boolean(response?.data?.ok ?? response?.data?.status === 'ok' ?? response?.status === 200); _cachedWithoutBgHealth = { ok, checkedAt: now }; return ok; } catch { _cachedWithoutBgHealth = { ok: false, checkedAt: now }; return false; } }
+async function startWithoutBgDaemon() { try { await execFileAsync('docker', ['compose', '-f', WITHOUTBG_DAEMON_COMPOSE, 'up', '-d'], { cwd: path.dirname(WITHOUTBG_DAEMON_COMPOSE) }); } catch (error) { const detail = String(error?.stderr || error?.message || error); throw new Error(`Failed to start withoutBG daemon with docker compose: ${detail}`); } }
 function providerFrom(value) { const provider = String(value || env('IMAGE_MCP_DEFAULT_PROVIDER') || 'kilo').toLowerCase(); return PROVIDERS.includes(provider) ? provider : 'kilo'; }
 function providerFromModel(model) { const value = String(model || '').trim().toLowerCase(); if (!value) return undefined; if (value.startsWith('gpt-image-') || value.startsWith('dall-e-') || value.startsWith('openai/')) return 'openai'; if (value.startsWith('google/gemini-') || value.startsWith('gemini-')) return 'gemini'; if (value.startsWith('black-forest-labs/') || value.startsWith('x-ai/') || value.startsWith('recraft/') || value.startsWith('sourceful/')) return 'openrouter'; if (value.startsWith('comfyui') || value.startsWith('drawthings') || value.startsWith('mlx')) return localProviderFrom() || 'openai-compatible'; return undefined; }
 function resolveProvider(args = {}) { const explicit = String(args.provider || '').trim(); if (explicit && explicit !== 'auto') return providerFrom(explicit); return providerFromModel(args.model) || providerFrom(); }
@@ -502,7 +515,11 @@ async function backgroundRemoveImage(args = {}) {
   const buffer = await readImageBuffer(input_image);
   const output_path = outPath ? path.resolve(outPath) : defaultSavedImagePath(`nobg-${Date.now()}.png`);
   if (backend === 'withoutbg') {
-    const healthy = await withoutBgDaemonHealthy();
+    let healthy = await withoutBgDaemonHealthy();
+    if (!healthy && withoutBgAutostartEnabled()) {
+      await startWithoutBgDaemon();
+      healthy = await withoutBgDaemonHealthy({ bypassCache: true });
+    }
     if (!healthy) throw new Error('withoutBG daemon is not running. Start it with docker-compose or set WITHOUTBG_AUTOSTART=1');
     const form = new FormData();
     form.append('file', buffer, { filename: 'image.png', contentType: 'image/png' });
