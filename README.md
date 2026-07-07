@@ -325,6 +325,14 @@ docker compose -f withoutbg-daemon/docker-compose.yml up -d
 
 If `WITHOUTBG_AUTOSTART=1` is set, the MCP will try to start it automatically when `backend=withoutbg` is used.
 
+If the MCP runs inside another container and the `withoutbg` daemon runs on the host, point the MCP at the host-published port:
+
+```bash
+WITHOUTBG_DAEMON_URL=http://host.docker.internal:8765
+```
+
+On Docker Desktop or OrbStack for macOS, `host.docker.internal` is the usual bridge from a container back to the host machine. If the MCP and `withoutbg` run in the same Docker network, you can also point `WITHOUTBG_DAEMON_URL` at the service name instead, such as `http://withoutbg:8765`.
+
 ## Web Optimization
 
 `background_remove` and `finalize_image` automatically run a web optimization pass after cleanup.
